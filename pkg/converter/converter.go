@@ -375,7 +375,8 @@ func (c *Converter) convertRequestBody(requestBodyRef *openapi3.RequestBodyRef) 
 
 		// For JSON and form content types, convert the schema to arguments
 		if strings.Contains(contentType, "application/json") ||
-			strings.Contains(contentType, "application/x-www-form-urlencoded") {
+			strings.Contains(contentType, "application/x-www-form-urlencoded") ||
+			strings.Contains(contentType, "multipart/form-data") {
 
 			// For object type, convert each property to an argument
 			if schema.Type == "object" && len(schema.Properties) > 0 {
