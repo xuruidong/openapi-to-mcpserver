@@ -7,7 +7,6 @@ toolchain go1.24.5
 require (
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/exp v0.0.0-20250717185816-542afb5b7346
 	gopkg.in/yaml.v3 v3.0.1
 )
 
