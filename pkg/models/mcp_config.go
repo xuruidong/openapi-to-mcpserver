@@ -21,10 +21,16 @@ type ServerToolConfig struct {
 
 // ServerConfig represents the MCP server configuration
 type ServerConfig struct {
-	Name            string           `yaml:"name" json:"name"`
-	Config          map[string]any   `yaml:"config,omitempty" json:"config,omitempty"`
-	AllowTools      []string         `yaml:"allowTools,omitempty" json:"allowTools,omitempty"`
-	SecuritySchemes []SecurityScheme `yaml:"securitySchemes,omitempty" json:"securitySchemes,omitempty"`
+	Name                      string                   `yaml:"name" json:"name"`
+	Config                    map[string]any           `yaml:"config,omitempty" json:"config,omitempty"`
+	Type                      string                   `yaml:"type,omitempty" json:"type,omitempty"`           // e.g.,"mcp-proxy"
+	Transport                 string                   `yaml:"transport,omitempty" json:"transport,omitempty"` // e.g.,"http", "sse"
+	McpServerURL              string                   `yaml:"mcpServerURL,omitempty" json:"mcpServerURL,omitempty"`
+	Timeout                   *int                     `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	DefaultUpstreamSecurity   *ToolSecurityRequirement `yaml:"defaultUpstreamSecurity,omitempty" json:"defaultUpstreamSecurity,omitempty"`
+	DefaultDownstreamSecurity *ToolSecurityRequirement `yaml:"defaultDownstreamSecurity,omitempty" json:"defaultDownstreamSecurity,omitempty"`
+	AllowTools                []string                 `yaml:"allowTools,omitempty" json:"allowTools,omitempty"`
+	SecuritySchemes           []SecurityScheme         `yaml:"securitySchemes,omitempty" json:"securitySchemes,omitempty"`
 }
 
 // SecurityScheme defines a security scheme that can be used by the tools.

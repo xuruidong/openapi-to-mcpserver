@@ -715,28 +715,44 @@ func (c *Converter) createOutputSchema(operation *openapi3.Operation) (map[strin
 	}
 
 	// Process the first content type (typically application/json)
-	for contentType, mediaType := range successResponse.Content {
+	for _, mediaType := range successResponse.Content {
 		if mediaType.Schema == nil || mediaType.Schema.Value == nil {
 			continue
 		}
 
 		schema := mediaType.Schema.Value
 
+		// Skip outputSchema generation if the root type is array
+		// This is due to incompatibility with mainstream MCP client SDKs like mcp-inspector
+		// which expect outputSchema to be an object type, not array
+		// See: https://github.com/modelcontextprotocol/inspector/issues/872
+		if schema.Type == "array" || (schema.Type == "" && schema.Items != nil && len(schema.Properties) == 0) {
+			return nil, nil
+		}
+
 		// Convert OpenAPI schema to MCP output schema
 		outputSchema := make(map[string]any)
-
-		// Set basic type information
-		if schema.Type != "" {
-			outputSchema["type"] = schema.Type
-		}
 
 		// Add description if available
 		if successResponse.Description != nil && *successResponse.Description != "" {
 			outputSchema["description"] = *successResponse.Description
 		}
 
-		// Handle array type recursively
-		if schema.Type == "array" && schema.Items != nil && schema.Items.Value != nil {
+		// Process schema based on its type or inferred type from properties/items
+		switch {
+		case schema.Type == "":
+			fallthrough
+		case schema.Type == "object" && len(schema.Properties) > 0:
+			outputSchema["type"] = "object"
+			properties := c.convertProperties(schema.Properties, schema.Required)
+			outputSchema["properties"] = properties
+			if len(schema.Required) > 0 {
+				outputSchema["required"] = schema.Required
+			}
+		case (schema.Type == "array" || (schema.Type == "" && schema.Items != nil)) && schema.Items != nil && schema.Items.Value != nil:
+			// This case should not be reached due to the early return above
+			// but keeping it for completeness
+			outputSchema["type"] = "array"
 			itemsSchema := make(map[string]any)
 			itemsSchema["type"] = schema.Items.Value.Type
 			if schema.Items.Value.Description != "" {
@@ -744,7 +760,7 @@ func (c *Converter) createOutputSchema(operation *openapi3.Operation) (map[strin
 			}
 
 			// Recursively handle array items if they are objects
-			if schema.Items.Value.Type == "object" && len(schema.Items.Value.Properties) > 0 {
+			if schema.Items.Value.Type == "object" || (schema.Items.Value.Type == "" && len(schema.Items.Value.Properties) > 0) {
 				nestedProps := c.convertProperties(schema.Items.Value.Properties, schema.Items.Value.Required)
 				itemsSchema["properties"] = nestedProps
 				if len(schema.Items.Value.Required) > 0 {
@@ -753,21 +769,9 @@ func (c *Converter) createOutputSchema(operation *openapi3.Operation) (map[strin
 			}
 
 			outputSchema["items"] = itemsSchema
+		default:
+			outputSchema["type"] = schema.Type
 		}
-
-		// Handle object type with properties
-		if schema.Type == "object" && len(schema.Properties) > 0 {
-			properties := c.convertProperties(schema.Properties, schema.Required)
-			outputSchema["properties"] = properties
-
-			// Add required fields if any
-			if len(schema.Required) > 0 {
-				outputSchema["required"] = schema.Required
-			}
-		}
-
-		// Add content type information
-		outputSchema["contentType"] = contentType
 
 		return outputSchema, nil
 	}
@@ -777,6 +781,12 @@ func (c *Converter) createOutputSchema(operation *openapi3.Operation) (map[strin
 
 // convertProperties recursively converts OpenAPI properties to MCP output schema format
 func (c *Converter) convertProperties(properties map[string]*openapi3.SchemaRef, required []string) map[string]any {
+	return c.convertPropertiesWithVisited(properties, required, make(map[*openapi3.Schema]bool))
+}
+
+// convertPropertiesWithVisited recursively converts OpenAPI properties to MCP output schema format
+// with circular reference detection using a visited map
+func (c *Converter) convertPropertiesWithVisited(properties map[string]*openapi3.SchemaRef, _ []string, visited map[*openapi3.Schema]bool) map[string]any {
 	result := make(map[string]any)
 
 	// Get property names and sort them alphabetically for consistent output
@@ -793,6 +803,12 @@ func (c *Converter) convertProperties(properties map[string]*openapi3.SchemaRef,
 			continue
 		}
 
+		// Check for circular reference
+		if visited[propRef.Value] {
+			// Skip this property to avoid infinite recursion
+			continue
+		}
+
 		propSchema := make(map[string]any)
 		propSchema["type"] = propRef.Value.Type
 
@@ -802,7 +818,12 @@ func (c *Converter) convertProperties(properties map[string]*openapi3.SchemaRef,
 
 		// Handle nested object properties recursively
 		if propRef.Value.Type == "object" && len(propRef.Value.Properties) > 0 {
-			nestedProps := c.convertProperties(propRef.Value.Properties, propRef.Value.Required)
+			// Mark this schema as visited
+			visited[propRef.Value] = true
+			nestedProps := c.convertPropertiesWithVisited(propRef.Value.Properties, propRef.Value.Required, visited)
+			// Unmark after processing to allow the same schema in different branches
+			delete(visited, propRef.Value)
+
 			propSchema["properties"] = nestedProps
 
 			// Add required fields for nested objects
@@ -821,10 +842,18 @@ func (c *Converter) convertProperties(properties map[string]*openapi3.SchemaRef,
 
 			// Recursively handle array items if they are objects
 			if propRef.Value.Items.Value.Type == "object" && len(propRef.Value.Items.Value.Properties) > 0 {
-				nestedProps := c.convertProperties(propRef.Value.Items.Value.Properties, propRef.Value.Items.Value.Required)
-				itemsSchema["properties"] = nestedProps
-				if len(propRef.Value.Items.Value.Required) > 0 {
-					itemsSchema["required"] = propRef.Value.Items.Value.Required
+				// Check for circular reference in array items
+				if !visited[propRef.Value.Items.Value] {
+					// Mark this schema as visited
+					visited[propRef.Value.Items.Value] = true
+					nestedProps := c.convertPropertiesWithVisited(propRef.Value.Items.Value.Properties, propRef.Value.Items.Value.Required, visited)
+					// Unmark after processing to allow the same schema in different branches
+					delete(visited, propRef.Value.Items.Value)
+
+					itemsSchema["properties"] = nestedProps
+					if len(propRef.Value.Items.Value.Required) > 0 {
+						itemsSchema["required"] = propRef.Value.Items.Value.Required
+					}
 				}
 			}
 
@@ -839,8 +868,20 @@ func (c *Converter) convertProperties(properties map[string]*openapi3.SchemaRef,
 
 // convertNestedProperties recursively converts nested properties for request body arguments
 func (c *Converter) convertNestedProperties(schema *openapi3.Schema) map[string]any {
+	return c.convertNestedPropertiesWithVisited(schema, make(map[*openapi3.Schema]bool))
+}
+
+// convertNestedPropertiesWithVisited recursively converts nested properties for request body arguments
+// with circular reference detection using a visited map
+func (c *Converter) convertNestedPropertiesWithVisited(schema *openapi3.Schema, visited map[*openapi3.Schema]bool) map[string]any {
 	if schema == nil {
 		return nil
+	}
+
+	// Check for circular reference
+	if visited[schema] {
+		// Return empty map to avoid infinite recursion
+		return make(map[string]any)
 	}
 
 	result := make(map[string]any)
@@ -848,6 +889,9 @@ func (c *Converter) convertNestedProperties(schema *openapi3.Schema) map[string]
 	// Handle object type with properties
 	if schema.Type == "object" && len(schema.Properties) > 0 {
 		properties := make(map[string]any)
+
+		// Mark this schema as visited
+		visited[schema] = true
 
 		for propName, propRef := range schema.Properties {
 			if propRef.Value == nil {
@@ -873,9 +917,12 @@ func (c *Converter) convertNestedProperties(schema *openapi3.Schema) map[string]
 
 			// Recursively handle nested object properties
 			if propRef.Value.Type == "object" && len(propRef.Value.Properties) > 0 {
-				nestedProps := c.convertNestedProperties(propRef.Value)
+				nestedProps := c.convertNestedPropertiesWithVisited(propRef.Value, visited)
 				if nestedProps != nil {
-					propSchema["properties"] = nestedProps
+					// Extract the actual properties to avoid double wrapping
+					if props, ok := nestedProps["properties"]; ok {
+						propSchema["properties"] = props
+					}
 				}
 			}
 
@@ -892,9 +939,12 @@ func (c *Converter) convertNestedProperties(schema *openapi3.Schema) map[string]
 
 				// Recursively handle array items if they are objects
 				if propRef.Value.Items.Value.Type == "object" && len(propRef.Value.Items.Value.Properties) > 0 {
-					nestedProps := c.convertNestedProperties(propRef.Value.Items.Value)
+					nestedProps := c.convertNestedPropertiesWithVisited(propRef.Value.Items.Value, visited)
 					if nestedProps != nil {
-						itemsSchema["properties"] = nestedProps
+						// Extract the actual properties to avoid double wrapping
+						if props, ok := nestedProps["properties"]; ok {
+							itemsSchema["properties"] = props
+						}
 					}
 				}
 
@@ -903,6 +953,9 @@ func (c *Converter) convertNestedProperties(schema *openapi3.Schema) map[string]
 
 			properties[propName] = propSchema
 		}
+
+		// Unmark after processing to allow the same schema in different branches
+		delete(visited, schema)
 
 		result["properties"] = properties
 
