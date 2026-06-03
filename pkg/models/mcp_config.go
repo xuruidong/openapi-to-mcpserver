@@ -31,6 +31,7 @@ type ServerConfig struct {
 	DefaultDownstreamSecurity *ToolSecurityRequirement `yaml:"defaultDownstreamSecurity,omitempty" json:"defaultDownstreamSecurity,omitempty"`
 	AllowTools                []string                 `yaml:"allowTools,omitempty" json:"allowTools,omitempty"`
 	SecuritySchemes           []SecurityScheme         `yaml:"securitySchemes,omitempty" json:"securitySchemes,omitempty"`
+	PassthroughAuthHeader     *bool                    `yaml:"passthroughAuthHeader,omitempty" json:"passthroughAuthHeader,omitempty"` // If true, pass through Authorization header even without downstream security
 }
 
 // SecurityScheme defines a security scheme that can be used by the tools.

@@ -58,13 +58,12 @@ func (c *Converter) Convert() (*models.MCPConfig, error) {
 			if schemeRef != nil && schemeRef.Value != nil {
 				scheme := schemeRef.Value
 				mcpScheme := models.SecurityScheme{
-					ID:     name,
-					Type:   scheme.Type,
-					Scheme: scheme.Scheme,
-					In:     scheme.In,
-					Name:   scheme.Name,
-					// DefaultCredential is not directly available in OpenAPI SecurityScheme,
-					// it's an extension for MCP. User can set it via template or manually.
+					ID:                name,
+					Type:              scheme.Type,
+					Scheme:            scheme.Scheme,
+					In:                scheme.In,
+					Name:              scheme.Name,
+					DefaultCredential: extractDefaultCredential(scheme),
 				}
 				config.Server.SecuritySchemes = append(config.Server.SecuritySchemes, mcpScheme)
 			}
@@ -101,6 +100,34 @@ func (c *Converter) Convert() (*models.MCPConfig, error) {
 	})
 
 	return config, nil
+}
+
+// extractDefaultCredential gets MCP-specific default credential from security scheme extensions.
+// It prefers the OpenAPI extension key x-defaultCredential, and falls back to defaultCredential
+// for backward compatibility.
+func extractDefaultCredential(scheme *openapi3.SecurityScheme) string {
+	if scheme == nil || len(scheme.Extensions) == 0 {
+		return ""
+	}
+
+	if value, found := scheme.Extensions["x-defaultCredential"]; found {
+		return stringifyExtensionValue(value)
+	}
+	if value, found := scheme.Extensions["defaultCredential"]; found {
+		return stringifyExtensionValue(value)
+	}
+
+	return ""
+}
+
+func stringifyExtensionValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if str, ok := value.(string); ok {
+		return str
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 // applyTemplate applies a template to the generated configuration
@@ -378,8 +405,38 @@ func (c *Converter) convertRequestBody(requestBodyRef *openapi3.RequestBodyRef) 
 			strings.Contains(contentType, "application/x-www-form-urlencoded") ||
 			strings.Contains(contentType, "multipart/form-data") {
 
-			// For object type, convert each property to an argument
-			if schema.Type == "object" && len(schema.Properties) > 0 {
+			// For array type, create a single argument to hold the entire array
+			if schema.Type == "array" && schema.Items != nil && schema.Items.Value != nil {
+				arg := models.Arg{
+					Name:        "items",
+					Description: requestBody.Description,
+					Type:        "array",
+					Required:    requestBody.Required,
+					Position:    "body",
+				}
+
+				// Set items schema
+				arg.Items = map[string]any{
+					"type": schema.Items.Value.Type,
+				}
+				if schema.Items.Value.Description != "" {
+					arg.Items["description"] = schema.Items.Value.Description
+				}
+
+				// Recursively handle array items if they are objects
+				if schema.Items.Value.Type == "object" && len(schema.Items.Value.Properties) > 0 {
+					nestedProps := c.convertNestedProperties(schema.Items.Value)
+					if nestedProps != nil {
+						arg.Items["properties"] = nestedProps["properties"]
+						if required, ok := nestedProps["required"]; ok {
+							arg.Items["required"] = required
+						}
+					}
+				}
+
+				args = append(args, arg)
+			} else if schema.Type == "object" && len(schema.Properties) > 0 {
+				// For object type, convert each property to an argument
 				for propName, propRef := range schema.Properties {
 					if propRef.Value == nil {
 						continue
@@ -507,12 +564,22 @@ func (c *Converter) createRequestTemplate(path, method string, operation *openap
 
 	// Add Content-Type header based on request body content type
 	if operation.RequestBody != nil && operation.RequestBody.Value != nil {
-		for contentType := range operation.RequestBody.Value.Content {
+		for contentType, mediaType := range operation.RequestBody.Value.Content {
 			// Add the Content-Type header
 			template.Headers = append(template.Headers, models.Header{
 				Key:   "Content-Type",
 				Value: contentType,
 			})
+
+			// Check if request body is array type - if so, set body template to reference the items arg
+			if mediaType.Schema != nil && mediaType.Schema.Value != nil {
+				schema := mediaType.Schema.Value
+				if schema.Type == "array" && schema.Items != nil && schema.Items.Value != nil {
+					// For array type request body, set body template to reference the items argument
+					template.Body = "{{.args.items}}"
+				}
+			}
+
 			break // Just use the first content type
 		}
 	}
